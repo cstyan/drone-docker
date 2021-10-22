@@ -16,7 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
 	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/ecr"
+	ecr "github.com/aws/aws-sdk-go/service/ecrpublic"
 )
 
 const defaultRegion = "us-east-1"
@@ -34,7 +34,6 @@ func main() {
 		key              = getenv("PLUGIN_ACCESS_KEY", "ECR_ACCESS_KEY", "AWS_ACCESS_KEY_ID")
 		secret           = getenv("PLUGIN_SECRET_KEY", "ECR_SECRET_KEY", "AWS_SECRET_ACCESS_KEY")
 		create           = parseBoolOrDefault(false, getenv("PLUGIN_CREATE_REPOSITORY", "ECR_CREATE_REPOSITORY"))
-		lifecyclePolicy  = getenv("PLUGIN_LIFECYCLE_POLICY")
 		repositoryPolicy = getenv("PLUGIN_REPOSITORY_POLICY")
 		assumeRole       = getenv("PLUGIN_ASSUME_ROLE")
 		externalId       = getenv("PLUGIN_EXTERNAL_ID")
@@ -59,38 +58,16 @@ func main() {
 	}
 
 	svc := getECRClient(sess, assumeRole, externalId)
-	username, password, defaultRegistry, err := getAuthInfo(svc)
-
-	if registry == "" {
-		registry = defaultRegistry
-	}
+	username, password, err := getAuthInfo(svc)
 
 	if err != nil {
 		log.Fatal(fmt.Sprintf("error getting ECR auth: %v", err))
 	}
 
-	if !strings.HasPrefix(repo, registry) {
-		repo = fmt.Sprintf("%s/%s", registry, repo)
-	}
-
 	if create {
-		err = ensureRepoExists(svc, trimHostname(repo, registry), scanOnPush)
+		err = ensureRepoExists(svc, repo, scanOnPush)
 		if err != nil {
 			log.Fatal(fmt.Sprintf("error creating ECR repo: %v", err))
-		}
-		err = updateImageScannningConfig(svc, trimHostname(repo, registry), scanOnPush)
-		if err != nil {
-			log.Fatal(fmt.Sprintf("error updating scan on push for ECR repo: %v", err))
-		}
-	}
-
-	if lifecyclePolicy != "" {
-		p, err := ioutil.ReadFile(lifecyclePolicy)
-		if err != nil {
-			log.Fatal(err)
-		}
-		if err := uploadLifeCyclePolicy(svc, string(p), trimHostname(repo, registry)); err != nil {
-			log.Fatal(fmt.Sprintf("error uploading ECR lifecycle policy: %v", err))
 		}
 	}
 
@@ -124,10 +101,9 @@ func trimHostname(repo, registry string) string {
 	return repo
 }
 
-func ensureRepoExists(svc *ecr.ECR, name string, scanOnPush bool) (err error) {
+func ensureRepoExists(svc *ecr.ECRPublic, name string, scanOnPush bool) (err error) {
 	input := &ecr.CreateRepositoryInput{}
 	input.SetRepositoryName(name)
-	input.SetImageScanningConfiguration(&ecr.ImageScanningConfiguration{ScanOnPush: &scanOnPush})
 	_, err = svc.CreateRepository(input)
 	if err != nil {
 		if aerr, ok := err.(awserr.Error); ok && aerr.Code() == ecr.ErrCodeRepositoryAlreadyExistsException {
@@ -139,25 +115,7 @@ func ensureRepoExists(svc *ecr.ECR, name string, scanOnPush bool) (err error) {
 	return
 }
 
-func updateImageScannningConfig(svc *ecr.ECR, name string, scanOnPush bool) (err error) {
-	input := &ecr.PutImageScanningConfigurationInput{}
-	input.SetRepositoryName(name)
-	input.SetImageScanningConfiguration(&ecr.ImageScanningConfiguration{ScanOnPush: &scanOnPush})
-	_, err = svc.PutImageScanningConfiguration(input)
-
-	return err
-}
-
-func uploadLifeCyclePolicy(svc *ecr.ECR, lifecyclePolicy string, name string) (err error) {
-	input := &ecr.PutLifecyclePolicyInput{}
-	input.SetLifecyclePolicyText(lifecyclePolicy)
-	input.SetRepositoryName(name)
-	_, err = svc.PutLifecyclePolicy(input)
-
-	return err
-}
-
-func uploadRepositoryPolicy(svc *ecr.ECR, repositoryPolicy string, name string) (err error) {
+func uploadRepositoryPolicy(svc *ecr.ECRPublic, repositoryPolicy string, name string) (err error) {
 	input := &ecr.SetRepositoryPolicyInput{}
 	input.SetPolicyText(repositoryPolicy)
 	input.SetRepositoryName(name)
@@ -166,7 +124,7 @@ func uploadRepositoryPolicy(svc *ecr.ECR, repositoryPolicy string, name string) 
 	return err
 }
 
-func getAuthInfo(svc *ecr.ECR) (username, password, registry string, err error) {
+func getAuthInfo(svc *ecr.ECRPublic) (username, password string, err error) {
 	var result *ecr.GetAuthorizationTokenOutput
 	var decoded []byte
 
@@ -175,14 +133,14 @@ func getAuthInfo(svc *ecr.ECR) (username, password, registry string, err error) 
 		return
 	}
 
-	auth := result.AuthorizationData[0]
+	auth := result.AuthorizationData
 	token := *auth.AuthorizationToken
 	decoded, err = base64.StdEncoding.DecodeString(token)
 	if err != nil {
 		return
 	}
 
-	registry = strings.TrimPrefix(*auth.ProxyEndpoint, "https://")
+	// registry = strings.TrimPrefix(*auth.ProxyEndpoint, "https://")
 	creds := strings.Split(string(decoded), ":")
 	username = creds[0]
 	password = creds[1]
@@ -209,7 +167,7 @@ func getenv(key ...string) (s string) {
 	return
 }
 
-func getECRClient(sess *session.Session, role string, externalId string) *ecr.ECR {
+func getECRClient(sess *session.Session, role string, externalId string) *ecr.ECRPublic {
 	if role == "" {
 		return ecr.New(sess)
 	}
